@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Простой анализ журналов и ошибок веб-сервера">
+  <title>Log Analyzer</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Log Analyzer, на главную">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22V10m7 16V4m7 18V8m7 18V4"/></svg>
+      <span>Log Analyzer</span>
+    </a>
+    <button class="button secondary" id="demo-button" type="button">Запустить демо</button>
+  </header>
+
+  <main class="container">
+    <section class="intro" aria-labelledby="page-title">
+      <h1 id="page-title">Анализ журналов</h1>
+      <p>Загрузите логи, чтобы найти инциденты, возможные причины и связанные записи.</p>
+    </section>
+
+    <section class="card upload-card" aria-labelledby="upload-title">
+      <h2 id="upload-title">Новый анализ</h2>
+      <form id="upload-form">
+        <div class="upload-fields">
+          <div class="field">
+            <label for="file-input">Файлы журналов</label>
+            <input id="file-input" name="files" type="file" multiple required accept=".log,.txt,.json,.jsonl">
+          </div>
+          <div class="field service-field">
+            <label for="service-input">Сервис <span>необязательно</span></label>
+            <input id="service-input" name="service" placeholder="Например, shop-web" maxlength="120">
+          </div>
+          <button class="button primary" type="submit">Загрузить и анализировать</button>
+        </div>
+        <p class="form-note">NGINX, Apache, error log или JSON Lines · UTF-8 · до 10 МБ</p>
+      </form>
+    </section>
+
+    <section class="results-section" aria-labelledby="results-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="results-title">Результаты анализа</h2>
+          <p id="dataset-meta" class="muted">Загрузите журналы или запустите демонстрацию.</p>
+        </div>
+        <span id="run-status" class="status-badge">Нет данных</span>
+      </div>
+
+      <div class="dataset-picker">
+        <label for="dataset-select">Набор данных</label>
+        <select id="dataset-select" disabled><option value="">Нет наборов</option></select>
+      </div>
+
+      <div class="metrics-grid">
+        <article class="metric"><span>Запросы</span><strong id="metric-events">—</strong></article>
+        <article class="metric"><span>Инциденты</span><strong id="metric-incidents">—</strong></article>
+        <article class="metric"><span>Требуют проверки</span><strong id="metric-review">—</strong></article>
+        <article class="metric"><span>Макс. доля ошибок</span><strong id="metric-errors">—</strong></article>
+      </div>
+      <div id="run-warnings" class="warning-box" hidden></div>
+    </section>
+
+    <section class="incidents-section" aria-labelledby="incidents-title">
+      <div class="section-heading">
+        <h2 id="incidents-title">Инциденты</h2>
+        <span id="incident-count" class="muted">0 записей</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Время</th><th>Инцидент</th><th>Сервис / маршрут</th><th>Значимость</th><th><span class="visually-hidden">Действие</span></th></tr></thead>
+          <tbody id="incidents-body"><tr><td colspan="5" class="empty-cell">Инциденты появятся после анализа.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="incident-dialog" aria-labelledby="incident-detail-title">
+    <div class="dialog-heading">
+      <h2 id="incident-detail-title">Карточка инцидента</h2>
+      <button id="close-incident" class="icon-button" type="button" aria-label="Закрыть">×</button>
+    </div>
+    <div id="incident-detail"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

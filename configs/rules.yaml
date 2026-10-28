@@ -1,0 +1,25 @@
+rules:
+  - id: AUTH_ISSUER_MISMATCH
+    version: 1
+    scope: group
+    when:
+      template_contains: "unexpected issuer"
+      status_in: [401]
+      related_events_gte: 2
+    then:
+      hypothesis: authentication_issuer_mismatch
+      severity: high
+      recommendation: compare_token_issuer_configuration
+      evidence: [request_id, route, status, template_id]
+  - id: UPSTREAM_TIMEOUT
+    version: 1
+    scope: group
+    when:
+      message_contains: "upstream timed out"
+      status_in: [504]
+      related_events_gte: 2
+    then:
+      hypothesis: upstream_timeout
+      severity: high
+      recommendation: inspect_upstream_health_and_timeout_settings
+      evidence: [request_id, route, status, template_id]

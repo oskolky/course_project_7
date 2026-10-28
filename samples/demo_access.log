@@ -1,0 +1,15 @@
+10.0.0.20 - - [27/Oct/2026:10:00:01 +0000] "GET /api/catalog HTTP/1.1" 200 512 "-" "CourseDemo/1.0" 0.042 0.040 ok-0
+10.0.0.20 - - [27/Oct/2026:10:00:04 +0000] "GET /api/catalog HTTP/1.1" 200 512 "-" "CourseDemo/1.0" 0.042 0.040 ok-1
+10.0.0.20 - - [27/Oct/2026:10:00:07 +0000] "GET /api/catalog HTTP/1.1" 200 512 "-" "CourseDemo/1.0" 0.042 0.040 ok-2
+10.0.0.20 - - [27/Oct/2026:10:00:10 +0000] "GET /api/catalog HTTP/1.1" 200 512 "-" "CourseDemo/1.0" 0.042 0.040 ok-3
+10.0.0.21 - - [27/Oct/2026:10:00:15 +0000] "POST /api/session HTTP/1.1" 401 512 "-" "CourseDemo/1.0" 0.036 0.034 auth-0
+10.0.0.21 - - [27/Oct/2026:10:00:18 +0000] "POST /api/session HTTP/1.1" 401 512 "-" "CourseDemo/1.0" 0.036 0.034 auth-1
+10.0.0.21 - - [27/Oct/2026:10:00:21 +0000] "POST /api/session HTTP/1.1" 401 512 "-" "CourseDemo/1.0" 0.036 0.034 auth-2
+10.0.0.21 - - [27/Oct/2026:10:00:24 +0000] "POST /api/session HTTP/1.1" 401 512 "-" "CourseDemo/1.0" 0.036 0.034 auth-3
+10.0.0.22 - - [27/Oct/2026:10:00:33 +0000] "GET /assets/app-0.js HTTP/1.1" 404 512 "-" "CourseDemo/1.0" 0.008 - static-0
+10.0.0.22 - - [27/Oct/2026:10:00:35 +0000] "GET /assets/app-1.js HTTP/1.1" 404 512 "-" "CourseDemo/1.0" 0.008 - static-1
+10.0.0.22 - - [27/Oct/2026:10:00:37 +0000] "GET /assets/app-2.js HTTP/1.1" 404 512 "-" "CourseDemo/1.0" 0.008 - static-2
+10.0.0.23 - - [27/Oct/2026:10:01:06 +0000] "GET /api/checkout HTTP/1.1" 504 512 "-" "CourseDemo/1.0" 3.002 3.000 up-0
+10.0.0.23 - - [27/Oct/2026:10:01:10 +0000] "GET /api/checkout HTTP/1.1" 504 512 "-" "CourseDemo/1.0" 3.002 3.000 up-1
+10.0.0.23 - - [27/Oct/2026:10:01:14 +0000] "GET /api/checkout HTTP/1.1" 504 512 "-" "CourseDemo/1.0" 3.002 3.000 up-2
+10.0.0.23 - - [27/Oct/2026:10:01:18 +0000] "GET /api/checkout HTTP/1.1" 504 512 "-" "CourseDemo/1.0" 3.002 3.000 up-3
