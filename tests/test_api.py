@@ -50,3 +50,33 @@ then:
     duplicate = client.post("/api/rules", json={"yaml_text": yaml_text})
     assert duplicate.status_code == 400
     assert "immutable" in duplicate.json()["detail"]
+
+
+def test_api_delete_dataset_removes_derived_data(client):
+    line = '10.0.0.1 - - [27/Oct/2026:10:00:00 +0000] "GET /a HTTP/1.1" 200 10 "-" "agent" 0.01 - req-1\n'
+    response = client.post(
+        "/api/datasets", data={"adapter": "nginx", "service": "web", "analyze": "true"},
+        files={"files": ("access.log", line * 5, "text/plain")},
+    )
+    assert response.status_code == 202
+    dataset_id = response.json()["dataset"]["id"]
+    assert client.get(f"/api/runs/{response.json()['run']['id']}").json()["status"] == "completed"
+    assert client.delete(f"/api/datasets/{dataset_id}").status_code == 204
+    assert client.get(f"/api/datasets/{dataset_id}").status_code == 404
+    assert client.get("/api/events", params={"dataset_id": dataset_id}).json() == []
+    assert client.get("/api/incidents", params={"dataset_id": dataset_id}).json() == []
+    assert client.delete(f"/api/datasets/{dataset_id}").status_code == 404
+
+
+def test_api_purge_keeps_rules_and_models(client):
+    demo = client.post("/api/demo")
+    assert demo.status_code == 202
+    rules_before = client.get("/api/rules").json()
+    models_before = client.get("/api/models").json()
+    response = client.post("/api/maintenance/purge")
+    assert response.status_code == 200
+    assert response.json()["deleted"]["datasets"] >= 2
+    assert client.get("/api/datasets").json() == []
+    assert client.get("/api/incidents").json() == []
+    assert client.get("/api/rules").json() == rules_before
+    assert client.get("/api/models").json() == models_before

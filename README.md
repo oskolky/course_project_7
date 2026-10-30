@@ -49,6 +49,8 @@ docker run --rm -p 3000:3000 -v log-analyzer-data:/app/data log-analyzer
 ## Основные API-ресурсы
 
 - `POST /api/datasets` — multipart-загрузка файлов;
+- `DELETE /api/datasets/{dataset_id}` — удаление набора со всеми событиями, прогонами и инцидентами;
+- `POST /api/maintenance/purge` — полная очистка реестра журналов (правила и модели сохраняются);
 - `POST /api/datasets/json` — загрузка массива структурированных записей;
 - `POST /api/analysis` — новый запуск анализа существующего набора;
 - `GET /api/runs/{run_id}` — состояние запуска без повторных вычислений;

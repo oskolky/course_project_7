@@ -43,6 +43,10 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 6px 10px
 .button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
 .button.primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
 .button.secondary { color: var(--accent); }
+.button.danger { color: #b42318; border-color: #f0c4c0; }
+.button.danger:hover { background: #fef3f2; border-color: #d92d20; }
+.picker-actions { display: flex; gap: 8px; margin-top: 10px; }
+.picker-actions .button { min-height: 38px; padding: 7px 13px; font-size: 13px; }
 .button.full { width: 100%; }
 .results-section, .incidents-section { margin-top: 38px; }
 .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }

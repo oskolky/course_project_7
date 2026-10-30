@@ -53,6 +53,12 @@
       <div class="dataset-picker">
         <label for="dataset-select">Набор данных</label>
         <select id="dataset-select" disabled><option value="">Нет наборов</option></select>
+        <div class="picker-actions">
+          <button class="button secondary" id="delete-dataset-button" type="button" disabled>Удалить набор</button>
+          <button class="button secondary" id="train-model-button" type="button" disabled>Обучить модель</button>
+          <button class="button secondary" id="analyze-model-button" type="button" disabled>Анализировать с моделью</button>
+          <button class="button danger" id="purge-button" type="button">Очистить всё</button>
+        </div>
       </div>
 
       <div class="metrics-grid">

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
@@ -16,6 +16,7 @@ from log_analyzer.services.analyzer import (
     create_dataset_from_records, create_dataset_from_text, execute_analysis,
     load_context, new_run, train_model,
 )
+from log_analyzer.services.maintenance import delete_dataset_with_data, purge_datasets
 from log_analyzer.storage.database import SessionLocal, get_db
 from log_analyzer.storage.models import (
     AnalysisRunRecord, DatasetRecord, EventRecord, IncidentRecord,
@@ -110,6 +111,19 @@ def dataset_detail(dataset_id: str, db: Session = Depends(get_db)) -> dict:
     dataset = dataset_or_404(db, dataset_id)
     runs = db.scalars(select(AnalysisRunRecord).where(AnalysisRunRecord.dataset_id == dataset_id).order_by(AnalysisRunRecord.created_at.desc())).all()
     return {**dataset_dict(dataset), "runs": [run_dict(run) for run in runs]}
+
+
+@app.delete("/api/datasets/{dataset_id}", status_code=204)
+def delete_dataset(dataset_id: str, db: Session = Depends(get_db)) -> Response:
+    dataset_or_404(db, dataset_id)
+    delete_dataset_with_data(db, dataset_id)
+    return Response(status_code=204)
+
+
+@app.post("/api/maintenance/purge")
+def purge_registry(db: Session = Depends(get_db)) -> dict:
+    deleted = purge_datasets(db)
+    return {"deleted": deleted}
 
 
 @app.post("/api/analysis", status_code=202)

@@ -1,4 +1,4 @@
-const state = { datasets: [], currentDataset: null, currentRun: null };
+const state = { datasets: [], currentDataset: null, currentRun: null, currentModel: null };
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const severityNames = { critical: "Критическая", high: "Высокая", medium: "Средняя", low: "Низкая" };
@@ -44,6 +44,26 @@ async function refreshDatasets() {
     ? state.datasets.map((item) => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.stats.normalized_count ?? 0)} записей</option>`).join("")
     : '<option value="">Нет наборов</option>';
   if (state.currentDataset) select.value = state.currentDataset;
+  updateActionButtons();
+}
+
+function updateActionButtons() {
+  $("#delete-dataset-button").disabled = !state.datasets.length;
+  $("#train-model-button").disabled = !state.currentDataset;
+  $("#analyze-model-button").disabled = !state.currentDataset || !state.currentModel;
+}
+
+function resetResultsView() {
+  state.currentRun = null;
+  $("#dataset-meta").textContent = "Загрузите журналы или запустите демонстрацию.";
+  ["#metric-events", "#metric-incidents", "#metric-review", "#metric-errors"].forEach((id) => { $(id).textContent = "—"; });
+  renderRunStatus(null);
+  const warningBox = $("#run-warnings");
+  warningBox.hidden = true;
+  warningBox.textContent = "";
+  $("#incident-count").textContent = "0 записей";
+  $("#incidents-body").innerHTML = '<tr><td colspan="5" class="empty-cell">Инциденты появятся после анализа.</td></tr>';
+  $("#incident-dialog").close();
 }
 
 async function loadDataset(datasetId, runId = null) {
@@ -59,6 +79,7 @@ async function loadDataset(datasetId, runId = null) {
   const dataset = state.datasets.find((item) => item.id === datasetId) || await api(`/api/datasets/${datasetId}`);
   const stats = dataset.stats || {};
   $("#dataset-meta").textContent = `Обработано: ${stats.normalized_count ?? 0} · Отклонено: ${stats.rejected_count ?? 0}`;
+  updateActionButtons();
 }
 
 function renderOverview(data) {
@@ -180,10 +201,11 @@ $("#demo-button").addEventListener("click", async (event) => {
 
 $("#upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = event.currentTarget.querySelector("button[type=submit]");
+  const formElement = event.currentTarget;
+  const button = formElement.querySelector("button[type=submit]");
   busy(button, true);
   try {
-    const form = new FormData(event.currentTarget);
+    const form = new FormData(formElement);
     form.set("service", form.get("service")?.trim() || "unknown");
     form.set("analyze", "true");
     const result = await api("/api/datasets", { method: "POST", body: form });
@@ -192,7 +214,7 @@ $("#upload-form").addEventListener("submit", async (event) => {
     await refreshDatasets();
     await loadDataset(result.dataset.id, result.run.id);
     await pollRun(result.run.id);
-    event.currentTarget.reset();
+    formElement.reset();
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -209,6 +231,92 @@ $("#dataset-select").addEventListener("change", async (event) => {
   }
 });
 
+$("#delete-dataset-button").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const dataset = state.datasets.find((item) => item.id === state.currentDataset);
+  if (!dataset) return;
+  if (!confirm(`Удалить набор «${dataset.name}» вместе с событиями, прогонами и инцидентами?`)) return;
+  busy(button, true);
+  try {
+    await api(`/api/datasets/${dataset.id}`, { method: "DELETE" });
+    toast(`Набор «${dataset.name}» удалён`);
+    state.currentDataset = null;
+    state.currentRun = null;
+    await refreshDatasets();
+    if (state.datasets.length) await loadDataset(state.datasets[0].id);
+    else resetResultsView();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    busy(button, false);
+  }
+});
+
+$("#purge-button").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!state.datasets.length) {
+    toast("Реестр уже пуст");
+    return;
+  }
+  if (!confirm("Удалить ВСЕ наборы данных, события и инциденты? Правила и модели сохранятся.")) return;
+  if (!confirm("Действие необратимо. Точно очистить весь реестр журналов?")) return;
+  busy(button, true);
+  try {
+    const result = await api("/api/maintenance/purge", { method: "POST" });
+    toast(`Удалено наборов: ${result.deleted.datasets}, инцидентов: ${result.deleted.incidents}`);
+    state.currentDataset = null;
+    state.currentRun = null;
+    await refreshDatasets();
+    resetResultsView();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    busy(button, false);
+  }
+});
+
+$("#train-model-button").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const dataset = state.datasets.find((item) => item.id === state.currentDataset);
+  if (!dataset) return;
+  if (!confirm(`Обучить Isolation Forest на наборе «${dataset.name}»? Подойдёт только «тихий» период без инцидентов.`)) return;
+  busy(button, true);
+  try {
+    const model = await api("/api/models/train", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_id: dataset.id }),
+    });
+    state.currentModel = model.id;
+    toast(`Модель ${model.id} обучена на ${model.training_summary.windows} окнах`);
+    updateActionButtons();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    busy(button, false);
+  }
+});
+
+$("#analyze-model-button").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!state.currentDataset || !state.currentModel) return;
+  busy(button, true);
+  try {
+    const run = await api("/api/analysis", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_id: state.currentDataset, model_id: state.currentModel }),
+    });
+    state.currentRun = run;
+    renderRunStatus(run);
+    await pollRun(run.id);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    busy(button, false);
+  }
+});
+
 $("#incidents-body").addEventListener("click", (event) => {
   const button = event.target.closest("[data-incident]");
   if (button) openIncident(button.dataset.incident).catch((error) => toast(error.message, true));
@@ -222,6 +330,8 @@ $("#incident-dialog").addEventListener("click", (event) => {
 (async function init() {
   try {
     await api("/api/health");
+    const models = await api("/api/models");
+    state.currentModel = models.length ? models[0].id : null;
     await refreshDatasets();
     if (state.datasets.length) await loadDataset(state.datasets[0].id);
   } catch (error) {
