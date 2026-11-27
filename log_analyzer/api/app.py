@@ -50,6 +50,13 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Log Analyzer", version=APP_VERSION, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def analysis_task(run_id: str) -> None:
     with SessionLocal() as db:
