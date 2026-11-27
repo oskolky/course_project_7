@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Простой анализ журналов и ошибок веб-сервера">
+  <meta name="description" content="Анализ журналов и ошибок веб-сервера: база знаний правил и модель обнаружения аномалий">
   <title>Log Analyzer</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css">
+  <!-- Версия в адресе заставляет браузер заменить кэш после обновления программы. -->
+  <link rel="stylesheet" href="/static/styles.css?v=1.1.0">
 </head>
 <body>
   <header class="topbar">
@@ -57,6 +58,7 @@
           <button class="button secondary" id="delete-dataset-button" type="button" disabled>Удалить набор</button>
           <button class="button secondary" id="train-model-button" type="button" disabled>Обучить модель</button>
           <button class="button secondary" id="analyze-model-button" type="button" disabled>Анализировать с моделью</button>
+          <button class="button secondary" id="rules-only-button" type="button" disabled>Анализировать по правилам</button>
           <button class="button danger" id="purge-button" type="button">Очистить всё</button>
         </div>
       </div>
@@ -65,9 +67,10 @@
         <article class="metric"><span>Запросы</span><strong id="metric-events">—</strong></article>
         <article class="metric"><span>Инциденты</span><strong id="metric-incidents">—</strong></article>
         <article class="metric"><span>Требуют проверки</span><strong id="metric-review">—</strong></article>
+        <article class="metric"><span>Мало данных</span><strong id="metric-insufficient">—</strong></article>
         <article class="metric"><span>Макс. доля ошибок</span><strong id="metric-errors">—</strong></article>
       </div>
-      <div id="run-warnings" class="warning-box" hidden></div>
+      <div id="run-warnings" class="notice-box" hidden></div>
     </section>
 
     <section class="incidents-section" aria-labelledby="incidents-title">
@@ -75,11 +78,89 @@
         <h2 id="incidents-title">Инциденты</h2>
         <span id="incident-count" class="muted">0 записей</span>
       </div>
+      <div id="incident-distribution" class="chips" hidden></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Время</th><th>Инцидент</th><th>Сервис / маршрут</th><th>Значимость</th><th><span class="visually-hidden">Действие</span></th></tr></thead>
-          <tbody id="incidents-body"><tr><td colspan="5" class="empty-cell">Инциденты появятся после анализа.</td></tr></tbody>
+          <thead><tr><th>Время</th><th>Что обнаружено</th><th>Сервис / маршрут</th><th>Значимость</th><th>Основание</th><th><span class="visually-hidden">Действие</span></th></tr></thead>
+          <tbody id="incidents-body"><tr><td colspan="6" class="empty-cell">Инциденты появятся после анализа.</td></tr></tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="panel-section" aria-labelledby="templates-title">
+      <div class="section-heading">
+        <h2 id="templates-title">Повторяющиеся сообщения</h2>
+        <span id="template-count" class="muted"></span>
+      </div>
+      <p class="muted section-note">Похожие записи объединены в шаблоны. Число показывает, сколько раз шаблон встретился в наборе.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Шаблон сообщения</th><th>Записей</th><th>Впервые</th><th><span class="visually-hidden">Действие</span></th></tr></thead>
+          <tbody id="templates-body"><tr><td colspan="4" class="empty-cell">Шаблоны появятся после загрузки журналов.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel-section" aria-labelledby="protocol-title">
+      <div class="section-heading">
+        <h2 id="protocol-title">Протокол обработки</h2>
+        <span class="muted section-note">Шаги анализа и решение по каждому временному окну</span>
+      </div>
+      <ol id="protocol-steps" class="protocol-steps" hidden></ol>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Окно</th><th>Запросов</th><th>4xx</th><th>5xx</th><th>95% длит., мс</th><th>Правила</th><th>Модель</th><th>Решение</th></tr></thead>
+          <tbody id="protocol-body"><tr><td colspan="8" class="empty-cell">Протокол появится после анализа.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel-section" aria-labelledby="search-title">
+      <div class="section-heading">
+        <h2 id="search-title">Поиск записей</h2>
+        <span class="muted section-note">Поиск по времени, источнику, коду ответа, уровню и тексту сообщения</span>
+      </div>
+      <form id="search-form" class="search-form">
+        <div class="field"><label for="search-from">С</label><input id="search-from" type="datetime-local"></div>
+        <div class="field"><label for="search-to">По</label><input id="search-to" type="datetime-local"></div>
+        <div class="field">
+          <label for="search-source">Источник</label>
+          <select id="search-source">
+            <option value="">Любой</option>
+            <option value="nginx_access">Журнал доступа NGINX</option>
+            <option value="apache_access">Журнал доступа Apache</option>
+            <option value="error_log">Журнал ошибок</option>
+            <option value="application_json">Запись приложения (JSON)</option>
+          </select>
+        </div>
+        <div class="field"><label for="search-status">Код ответа</label><input id="search-status" type="number" min="100" max="599" placeholder="Например, 504"></div>
+        <div class="field">
+          <label for="search-severity">Уровень</label>
+          <select id="search-severity">
+            <option value="">Любой</option>
+            <option value="error">error</option>
+            <option value="warn">warn</option>
+            <option value="info">info</option>
+          </select>
+        </div>
+        <div class="field"><label for="search-request">Идентификатор запроса</label><input id="search-request" placeholder="request_id или trace_id" maxlength="160"></div>
+        <div class="field field-wide"><label for="search-q">Текст</label><input id="search-q" placeholder="Слово или фрагмент сообщения" maxlength="200"></div>
+        <div class="search-actions">
+          <button class="button primary" type="submit">Найти</button>
+          <button class="button secondary" type="button" id="search-reset">Сбросить</button>
+        </div>
+      </form>
+      <p id="search-summary" class="muted" hidden></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Время</th><th>Источник</th><th>Уровень</th><th>Запрос</th><th>Сообщение</th></tr></thead>
+          <tbody id="events-body"><tr><td colspan="5" class="empty-cell">Задайте условия и нажмите «Найти».</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button class="button secondary" id="search-prev" type="button" disabled>Назад</button>
+        <span id="search-page" class="muted"></span>
+        <button class="button secondary" id="search-next" type="button" disabled>Вперёд</button>
       </div>
     </section>
   </main>
@@ -93,6 +174,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=1.1.0" defer></script>
 </body>
 </html>

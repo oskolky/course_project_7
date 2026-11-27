@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -40,6 +40,7 @@ class IngestionIssue(BaseModel):
     source: str
     line_number: int | None = None
     error: str
+    detail: str | None = None
     raw_excerpt: str | None = None
 
 
@@ -78,6 +79,19 @@ class WindowFeatures(BaseModel):
         ]
 
 
+SCOPE_CONDITIONS: dict[str, frozenset[str]] = {
+    "event": frozenset({"template_contains", "message_contains", "status_in", "route_contains", "service_equals"}),
+    "group": frozenset({"template_contains", "message_contains", "status_in", "related_events_gte", "route_contains", "service_equals"}),
+    "window": frozenset({"status_in", "status_ratio_gte", "min_requests", "route_contains", "service_equals"}),
+}
+ALL_CONDITIONS: frozenset[str] = frozenset().union(*SCOPE_CONDITIONS.values())
+SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 class RuleDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -90,12 +104,7 @@ class RuleDefinition(BaseModel):
     @field_validator("when")
     @classmethod
     def validate_conditions(cls, value: dict[str, Any]) -> dict[str, Any]:
-        allowed = {
-            "template_contains", "message_contains", "status_in",
-            "related_events_gte", "status_ratio_gte", "min_requests",
-            "route_contains", "service_equals",
-        }
-        unknown = set(value) - allowed
+        unknown = set(value) - ALL_CONDITIONS
         if unknown:
             raise ValueError(f"Unsupported conditions: {sorted(unknown)}")
         if not value:
@@ -109,9 +118,47 @@ class RuleDefinition(BaseModel):
         missing = required - set(value)
         if missing:
             raise ValueError(f"Missing outcome fields: {sorted(missing)}")
-        if value["severity"] not in {"low", "medium", "high", "critical"}:
+        if value["severity"] not in SEVERITIES:
             raise ValueError("Unsupported severity")
+        for key in ("hypothesis", "recommendation"):
+            if not isinstance(value[key], str) or not value[key].strip():
+                raise ValueError(f"Outcome field {key} must be a non-empty string")
+        if not isinstance(value["evidence"], list):
+            raise ValueError("Outcome field evidence must be a list")
+        for key in ("title", "recommendation_text"):
+            if key in value and (not isinstance(value[key], str) or not value[key].strip()):
+                raise ValueError(f"Outcome field {key} must be a non-empty string")
         return value
+
+    @model_validator(mode="after")
+    def validate_against_scope(self) -> "RuleDefinition":
+        inapplicable = sorted(set(self.when) - SCOPE_CONDITIONS[self.scope])
+        if inapplicable:
+            raise ValueError(
+                f"Conditions {inapplicable} are not applicable to scope '{self.scope}'; "
+                f"allowed: {sorted(SCOPE_CONDITIONS[self.scope])}"
+            )
+        when = self.when
+        if "status_ratio_gte" in when and "status_in" not in when:
+            raise ValueError("Condition status_ratio_gte requires status_in")
+        statuses = when.get("status_in")
+        if statuses is not None and (
+            not isinstance(statuses, list) or not statuses
+            or not all(_is_int(item) and 100 <= item <= 599 for item in statuses)
+        ):
+            raise ValueError("status_in must be a non-empty list of HTTP status codes from 100 to 599")
+        for name in ("template_contains", "message_contains", "route_contains", "service_equals"):
+            if name in when and (not isinstance(when[name], str) or not when[name].strip()):
+                raise ValueError(f"Condition {name} must be a non-empty string")
+        for name in ("related_events_gte", "min_requests"):
+            if name in when and (not _is_int(when[name]) or when[name] < 1):
+                raise ValueError(f"Condition {name} must be a positive integer")
+        ratio = when.get("status_ratio_gte")
+        if ratio is not None and (
+            isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 < ratio <= 1
+        ):
+            raise ValueError("Condition status_ratio_gte must be a number from 0 (exclusive) to 1")
+        return self
 
 
 class AnalysisRequest(BaseModel):

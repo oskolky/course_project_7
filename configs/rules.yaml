@@ -1,4 +1,6 @@
 rules:
+  # title и recommendation_text — необязательные поля представления: на выводы они
+  # не влияют и выводятся в интерфейсе вместо служебных идентификаторов.
   - id: AUTH_ISSUER_MISMATCH
     version: 1
     scope: group
@@ -11,6 +13,8 @@ rules:
       severity: high
       recommendation: compare_token_issuer_configuration
       evidence: [request_id, route, status, template_id]
+      title: Несовпадение издателя токена при аутентификации
+      recommendation_text: Сверить издателя токенов (issuer) в конфигурации сервиса аутентификации и в приложении.
   - id: UPSTREAM_TIMEOUT
     version: 1
     scope: group
@@ -23,3 +27,5 @@ rules:
       severity: high
       recommendation: inspect_upstream_health_and_timeout_settings
       evidence: [request_id, route, status, template_id]
+      title: Тайм-аут ответа вышестоящего сервера (upstream)
+      recommendation_text: Проверить доступность и время ответа upstream, а также настройки тайм-аутов веб-сервера.

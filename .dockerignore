@@ -1,6 +1,10 @@
 __pycache__
 .pytest_cache
+.venv
 .git
+записка
+report
+tz.txt
 .env
 data/*.db*
 data/models/*.joblib

@@ -15,6 +15,17 @@ from log_analyzer.api.app import app
 from log_analyzer.storage.database import SessionLocal, engine
 from log_analyzer.storage.models import Base
 
+# Группы методики испытаний: каждый тест относится ровно к одной из них.
+TEST_GROUPS = {"typical", "boundary", "negative"}
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if not TEST_GROUPS & {marker.name for marker in item.iter_markers()}:
+            raise pytest.UsageError(
+                f"Тест {item.nodeid} не отмечен ни одной группой: {', '.join(sorted(TEST_GROUPS))}"
+            )
+
 
 @pytest.fixture()
 def db():

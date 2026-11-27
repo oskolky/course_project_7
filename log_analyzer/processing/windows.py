@@ -21,6 +21,12 @@ def percentile95(values: list[float]) -> float:
     return ordered[max(0, ceil(0.95 * len(ordered)) - 1)]
 
 
+def window_start_of(observed_at: datetime, window_seconds: int = WINDOW_SECONDS) -> datetime:
+    """Начало окна, в которое попадает событие (окна выровнены по эпохе Unix)."""
+    epoch = int(observed_at.timestamp())
+    return datetime.fromtimestamp(epoch - epoch % window_seconds, tz=timezone.utc)
+
+
 def build_windows(
     events: list[CanonicalEvent], groups: list[RequestGroupRecord],
     templates: list[TemplateRecord], window_seconds: int = WINDOW_SECONDS,
@@ -31,9 +37,7 @@ def build_windows(
     template_seen = {template.id: template.first_seen for template in templates}
     buckets: dict[datetime, list[CanonicalEvent]] = defaultdict(list)
     for event in events:
-        epoch = int(event.observed_at.timestamp())
-        start_epoch = epoch - epoch % window_seconds
-        buckets[datetime.fromtimestamp(start_epoch, tz=timezone.utc)].append(event)
+        buckets[window_start_of(event.observed_at, window_seconds)].append(event)
 
     windows: list[WindowFeatures] = []
     for start, items in sorted(buckets.items(), key=lambda pair: pair[0]):

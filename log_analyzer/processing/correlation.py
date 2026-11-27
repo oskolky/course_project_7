@@ -15,8 +15,13 @@ class _GroupState:
 
 
 def correlate_events(events: list[CanonicalEvent], delta_seconds: float = CORRELATION_DELTA_SECONDS) -> list[RequestGroupRecord]:
+    """Связывает события одного запроса в группы. Без идентификаторов событие может
+    присоединиться к группе с тем же сервисом и маршрутом, завершившейся не ранее
+    чем за delta_seconds. Такие группы-кандидаты индексируются по (сервис, маршрут)
+    и удаляются из индекса, как только интервал истёк: записи обрабатываются по
+    времени, и для следующих событий группа кандидатом уже не станет."""
     exact: dict[str, _GroupState] = {}
-    heuristic: list[_GroupState] = []
+    heuristic: dict[tuple[str, str | None], list[_GroupState]] = {}
     all_groups: list[_GroupState] = []
 
     def create(event: CanonicalEvent, key: str, quality: str) -> _GroupState:
@@ -45,8 +50,9 @@ def correlate_events(events: list[CanonicalEvent], delta_seconds: float = CORREL
                 state = create(event, key, "exact")
                 exact[key] = state
         elif event.client or event.route:
+            context = (event.service, event.route)
             candidates: list[_GroupState] = []
-            for candidate in heuristic:
+            for candidate in heuristic.get(context, ()):
                 group = candidate.record
                 elapsed = (event.observed_at - group.ended_at).total_seconds()
                 same_context = (
@@ -61,8 +67,13 @@ def correlate_events(events: list[CanonicalEvent], delta_seconds: float = CORREL
                 state.record.link_quality = "presumed"
             else:
                 state = create(event, f"unlinked:{event.event_id}", "uncertain")
-            if state not in heuristic:
-                heuristic.append(state)
+            bucket = heuristic.setdefault(context, [])
+            if not any(candidate is state for candidate in bucket):
+                bucket.append(state)
+            heuristic[context] = [
+                candidate for candidate in bucket
+                if (event.observed_at - candidate.record.ended_at).total_seconds() <= delta_seconds
+            ]
         else:
             state = create(event, f"unlinked:{event.event_id}", "uncertain")
 

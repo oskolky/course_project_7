@@ -17,6 +17,7 @@ CORRELATION_DELTA_SECONDS = float(os.getenv("CORRELATION_DELTA_SECONDS", "2.0"))
 WINDOW_SECONDS = int(os.getenv("WINDOW_SECONDS", "60"))
 MIN_WINDOW_REQUESTS = int(os.getenv("MIN_WINDOW_REQUESTS", "3"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+RULES_IN_INSUFFICIENT_WINDOWS = os.getenv("RULES_IN_INSUFFICIENT_WINDOWS", "true").strip().lower() not in ("0", "false", "no", "off")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)

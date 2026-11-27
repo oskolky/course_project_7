@@ -5,17 +5,24 @@ import re
 import uuid
 from typing import Any, Iterable
 
+from pydantic import ValidationError
+
 from log_analyzer.config import DEFAULT_TIMEZONE
 from log_analyzer.contracts import CanonicalEvent, IngestionIssue, IngestionResult
-from log_analyzer.processing.normalization import as_float, as_int, normalize_route, parse_timestamp
+from log_analyzer.processing.masking import mask_secrets, protect_value
+from log_analyzer.processing.normalization import (
+    NormalizationError, as_float, as_int, normalize_route, parse_timestamp,
+)
 
+# Строка запроса допускает пустое значение ("-"), бинарные данные и экранированные
+# кавычки; код состояния и объём ответа могут быть прочерками.
 ACCESS_RE = re.compile(
     r'^(?P<client>\S+)\s+\S+\s+\S+\s+\[(?P<time>[^\]]+)\]\s+'
-    r'"(?P<method>[A-Z]+)\s+(?P<uri>\S+)(?:\s+[^"]+)?"\s+'
-    r'(?P<status>\d{3})\s+(?P<body>\S+)'
-    r'(?:\s+"(?P<referer>[^"]*)"\s+"(?P<agent>[^"]*)")?'
-    r'(?:\s+(?P<request_time>[\d.]+))?'
-    r'(?:\s+(?P<upstream_time>[\d.-]+))?'
+    r'"(?P<request>(?:(?P<method>[A-Z]+)\s+(?P<uri>\S+)(?:\s+(?:[^"\\]|\\.)*)?)|(?:[^"\\]|\\.)*)"\s+'
+    r'(?P<status>\d{3}|-)\s+(?P<body>\d+|-)'
+    r'(?:\s+"(?P<referer>(?:[^"\\]|\\.)*)"\s+"(?P<agent>(?:[^"\\]|\\.)*)")?'
+    r'(?:\s+(?P<request_time>\d+(?:\.\d+)?))?'
+    r'(?:\s+(?P<upstream_time>[\d.]+|-))?'
     r'(?:\s+(?P<request_id>[A-Za-z0-9_-]+))?\s*$'
 )
 NGINX_ERROR_RE = re.compile(
@@ -25,10 +32,31 @@ NGINX_ERROR_RE = re.compile(
 APACHE_ERROR_RE = re.compile(
     r'^\[(?P<time>[^\]]+)\]\s+\[(?:(?P<module>[^:]+):)?(?P<severity>[^\]]+)\]\s+(?P<message>.*)$'
 )
+ADAPTERS = ("auto", "nginx", "apache", "error", "jsonl")
+
+MSG_ACCESS = "строка не соответствует формату журнала доступа NGINX или Apache"
+MSG_ERROR = "строка не соответствует формату журнала ошибок NGINX или Apache"
+MSG_JSON = "повреждённая запись JSON"
+MSG_JSON_SHAPE = "запись JSON не является объектом с полями события"
+MSG_EVENT = "запись не соответствует схеме события"
+MSG_ADAPTER = "указан неизвестный тип источника"
+MSG_UNEXPECTED = "не удалось обработать строку"
 
 
 def event_id_for(dataset_id: str, source: str, line_number: int, raw: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{dataset_id}:{source}:{line_number}:{raw}"))
+
+
+def protect_event(event: CanonicalEvent) -> CanonicalEvent:
+    """Скрывает секреты до сохранения события в базе данных. Идентификатор события
+    вычисляется по исходной строке, поэтому маскирование на него не влияет."""
+    event.raw = mask_secrets(event.raw)
+    if event.message:
+        event.message = mask_secrets(event.message)
+    if event.original_uri:
+        event.original_uri = mask_secrets(event.original_uri)
+    event.attributes = protect_value(event.attributes) or {}
+    return event
 
 
 def canonical_from_mapping(
@@ -52,7 +80,7 @@ def canonical_from_mapping(
     duration = request.get("duration_ms", mapping.get("duration_ms"))
     if duration is None:
         duration = as_float(mapping.get("request_time"), 1000)
-    return CanonicalEvent(
+    return protect_event(CanonicalEvent(
         event_id=event_id_for(dataset_id, source_name, line_number, raw),
         dataset_id=dataset_id,
         observed_at=parse_timestamp(observed),
@@ -72,19 +100,22 @@ def canonical_from_mapping(
         duration_ms=as_float(duration),
         message=str(message) if message is not None else raw,
         raw=raw,
-        attributes=mapping.get("attributes", {}),
+        attributes=mapping.get("attributes", {}) or {},
         warnings=warnings,
-    )
+    ))
 
 
 def parse_access_line(line: str, dataset_id: str, source_name: str, line_number: int,
                       service: str, source_type: str, file_offset: int) -> CanonicalEvent:
     match = ACCESS_RE.match(line)
     if not match:
-        raise ValueError("Access log format not recognized")
+        raise NormalizationError(MSG_ACCESS, "ожидается формат common или combined")
     data = match.groupdict()
     uri = data["uri"]
-    return CanonicalEvent(
+    status = as_int(data["status"])
+    request = data["request"] or "-"
+    message = f'{data["method"]} {uri} -> {status}' if data["method"] else f'"{request}" -> {status}'
+    return protect_event(CanonicalEvent(
         event_id=event_id_for(dataset_id, source_name, line_number, line),
         dataset_id=dataset_id,
         observed_at=parse_timestamp(data["time"]),
@@ -93,22 +124,22 @@ def parse_access_line(line: str, dataset_id: str, source_name: str, line_number:
         client=data["client"],
         file_offset=file_offset,
         line_number=line_number,
-        severity="warn" if int(data["status"]) >= 400 else "info",
+        severity="warn" if status is not None and status >= 400 else "info",
         request_id=data.get("request_id") if data.get("request_id") != "-" else None,
         method=data["method"], route=normalize_route(uri), original_uri=uri,
-        status=int(data["status"]),
+        status=status,
         duration_ms=as_float(data.get("request_time"), 1000),
-        message=f'{data["method"]} {uri} -> {data["status"]}',
+        message=message,
         raw=line,
         attributes={"user_agent": data.get("agent"), "upstream_time_s": data.get("upstream_time")},
-    )
+    ))
 
 
 def parse_error_line(line: str, dataset_id: str, source_name: str, line_number: int,
                      service: str, file_offset: int) -> CanonicalEvent:
     match = NGINX_ERROR_RE.match(line) or APACHE_ERROR_RE.match(line)
     if not match:
-        raise ValueError("Error log format not recognized")
+        raise NormalizationError(MSG_ERROR, "ожидается запись вида «дата [уровень] сообщение»")
     data = match.groupdict()
     message = data["message"]
     client = _search(r',\s*client:\s*([^,]+)', message)
@@ -117,7 +148,7 @@ def parse_error_line(line: str, dataset_id: str, source_name: str, line_number: 
     trace_id = _search(r'(?:trace_id|trace id)[=:]\s*["\']?([A-Za-z0-9_-]+)', message)
     method, uri = (request[0], request[1]) if request else (None, None)
     host = _search(r',\s*server:\s*([^,]+)', message)
-    return CanonicalEvent(
+    return protect_event(CanonicalEvent(
         event_id=event_id_for(dataset_id, source_name, line_number, line),
         dataset_id=dataset_id,
         observed_at=parse_timestamp(data["time"], DEFAULT_TIMEZONE),
@@ -127,12 +158,28 @@ def parse_error_line(line: str, dataset_id: str, source_name: str, line_number: 
         method=method, route=normalize_route(uri), original_uri=uri,
         status=504 if "upstream timed out" in message.lower() else None,
         message=message, raw=line,
-    )
+    ))
 
 
 def _search(pattern: str, text: str):
     match = re.search(pattern, text, re.IGNORECASE)
     return match.groups() if match and len(match.groups()) > 1 else (match.group(1) if match else None)
+
+
+def describe_issue(exc: Exception, adapter: str) -> tuple[str, str | None]:
+    """Возвращает понятное описание причины отклонения записи и техническую деталь."""
+    if isinstance(exc, NormalizationError):
+        return exc.message, exc.detail
+    detail = str(exc) or type(exc).__name__
+    if isinstance(exc, json.JSONDecodeError):
+        return MSG_JSON, detail
+    if isinstance(exc, ValidationError):
+        return MSG_EVENT, detail
+    if adapter in {"nginx", "apache"}:
+        return MSG_ACCESS, detail
+    if adapter == "error":
+        return MSG_ERROR, detail
+    return MSG_UNEXPECTED, detail
 
 
 def ingest_text_sources(
@@ -149,14 +196,15 @@ def ingest_text_sources(
             if not stripped:
                 continue
             result.read_count += 1
+            selected = adapter
             try:
-                selected = adapter
                 if selected == "auto":
-                    selected = "jsonl" if stripped.startswith("{") else ("error" if NGINX_ERROR_RE.match(stripped) or APACHE_ERROR_RE.match(stripped) else "nginx")
+                    selected = "jsonl" if stripped.startswith("{") else (
+                        "error" if NGINX_ERROR_RE.match(stripped) or APACHE_ERROR_RE.match(stripped) else "nginx")
                 if selected == "jsonl":
                     mapping = json.loads(stripped)
                     if not isinstance(mapping, dict):
-                        raise ValueError("JSON line must contain an object")
+                        raise NormalizationError(MSG_JSON_SHAPE, "ожидается объект в фигурных скобках")
                     event = canonical_from_mapping(
                         mapping, dataset_id=dataset_id, source_name=source_name,
                         line_number=line_number, raw=line, service=service, file_offset=current_offset,
@@ -166,13 +214,14 @@ def ingest_text_sources(
                 elif selected == "error":
                     event = parse_error_line(line, dataset_id, source_name, line_number, service, current_offset)
                 else:
-                    raise ValueError(f"Unknown adapter: {selected}")
+                    raise NormalizationError(MSG_ADAPTER, f"«{selected}»; допустимы {', '.join(ADAPTERS)}")
                 result.events.append(event)
             except Exception as exc:
                 result.rejected_count += 1
+                message, detail = describe_issue(exc, selected)
                 result.issues.append(IngestionIssue(
-                    source=source_name, line_number=line_number,
-                    error=str(exc), raw_excerpt=line[:240],
+                    source=source_name, line_number=line_number, error=message, detail=detail,
+                    raw_excerpt=mask_secrets(line[:240]),
                 ))
     return result
 
@@ -188,5 +237,6 @@ def ingest_api_records(records: list[dict[str, Any]], dataset_id: str, source_na
             ))
         except Exception as exc:
             result.rejected_count += 1
-            result.issues.append(IngestionIssue(source=source_name, line_number=index, error=str(exc), raw_excerpt=raw[:240]))
+            message, detail = describe_issue(exc, "jsonl")
+            result.issues.append(IngestionIssue(source=source_name, line_number=index, error=message, detail=detail, raw_excerpt=mask_secrets(raw[:240])))
     return result

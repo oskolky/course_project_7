@@ -1,6 +1,8 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
-filterwarnings = [
-  "ignore:.*on_event.*:DeprecationWarning",
+addopts = "-q --strict-markers"
+markers = [
+  "typical: типичный корректный сценарий",
+  "boundary: граничный случай — предельные условия, малый объём данных, неуверенный результат модели",
+  "negative: отрицательный случай — некорректные данные, отсутствие решения, противоречие",
 ]

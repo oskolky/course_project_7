@@ -39,6 +39,7 @@ class AnalysisRunRecord(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     dataset = relationship("DatasetRecord", back_populates="runs")
     incidents = relationship("IncidentRecord", back_populates="run", cascade="all, delete-orphan")
+    decisions = relationship("WindowDecisionRecord", back_populates="run", cascade="all, delete-orphan")
 
 
 class TemplateRecord(Base):
@@ -101,6 +102,8 @@ class RuleRecord(Base):
     hypothesis: Mapped[str] = mapped_column(Text)
     recommendation: Mapped[str] = mapped_column(Text)
     evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+    presentation: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     __table_args__ = (UniqueConstraint("id", "version", name="uq_rule_version"),)
 
@@ -112,7 +115,10 @@ class ModelVersionRecord(Base):
     feature_schema: Mapped[dict[str, Any]] = mapped_column(JSON)
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON)
     trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id"))
+
+    dataset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True
+    )
     artifact_path: Mapped[str] = mapped_column(Text)
     training_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -153,6 +159,21 @@ class EvidenceRecord(Base):
     excerpt: Mapped[str] = mapped_column(Text)
     incident = relationship("IncidentRecord", back_populates="evidence_items")
     event = relationship("EventRecord")
+
+
+class WindowDecisionRecord(Base):
+    """Решение арбитража по одному окну запуска, включая окна без инцидента:
+    шаги протокола обработки (проверка правил, оценка модели, решение)."""
+    __tablename__ = "window_decisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id"), index=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(24))
+    kind: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    run = relationship("AnalysisRunRecord", back_populates="decisions")
 
 
 Index("ix_events_dataset_time", EventRecord.dataset_id, EventRecord.observed_at)

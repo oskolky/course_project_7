@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import (
+    BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile,
+)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from log_analyzer.config import MAX_UPLOAD_BYTES, SAMPLES_DIR
-from log_analyzer.contracts import AnalysisRequest, ApiDataset, ReviewRequest, RuleUpload, TrainModelRequest, utc_now
+from log_analyzer.contracts import (
+    AnalysisRequest, ApiDataset, ReviewRequest, RuleUpload, TrainModelRequest, utc_now,
+)
 from log_analyzer.knowledge.rules import add_rule_version, sync_default_rules
 from log_analyzer.services.analyzer import (
     create_dataset_from_records, create_dataset_from_text, execute_analysis,
@@ -20,21 +27,28 @@ from log_analyzer.services.maintenance import delete_dataset_with_data, purge_da
 from log_analyzer.storage.database import SessionLocal, get_db
 from log_analyzer.storage.models import (
     AnalysisRunRecord, DatasetRecord, EventRecord, IncidentRecord,
-    ModelVersionRecord, RuleRecord,
+    ModelVersionRecord, RequestGroupRecord, RuleRecord, TemplateRecord, WindowDecisionRecord,
 )
 from log_analyzer.storage.serializers import (
-    dataset_dict, event_dict, incident_dict, model_dict, rule_dict, run_dict,
+    dataset_dict, event_dict, incident_detail_dict, incident_dict, iso, model_dict,
+    rule_dict, run_dict, template_dict,
 )
 
+APP_VERSION = "1.1.0"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
-app = FastAPI(title="Log Analyzer", version="1.0.0")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+STATIC_HEADERS = {"Cache-Control": "no-cache"}
 
 
-@app.on_event("startup")
-def startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
         sync_default_rules(db)
+    yield
+
+
+app = FastAPI(title="Log Analyzer", version=APP_VERSION, lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def analysis_task(run_id: str) -> None:
@@ -49,15 +63,29 @@ def dataset_or_404(db: Session, dataset_id: str) -> DatasetRecord:
     return dataset
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _storage_time(value: datetime, db: Session) -> datetime:
+    """Отметка времени для сравнения с хранимыми: во всемирном времени, а для SQLite
+    ещё и без часового пояса, поскольку SQLite хранит только поля даты и времени."""
+    aware = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    aware = aware.astimezone(timezone.utc)
+    if db.bind is not None and db.bind.dialect.name == "sqlite":
+        return aware.replace(tzinfo=None)
+    return aware
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=STATIC_HEADERS)
 
 
 @app.get("/api/health")
 def health(db: Session = Depends(get_db)) -> dict:
     db.execute(text("SELECT 1"))
-    return {"status": "ok", "time": utc_now().isoformat()}
+    return {"status": "ok", "time": utc_now().isoformat(), "version": APP_VERSION}
 
 
 @app.get("/api/datasets")
@@ -67,7 +95,7 @@ def datasets(db: Session = Depends(get_db)) -> list[dict]:
 
 
 @app.post("/api/datasets", status_code=202)
-async def upload_dataset(
+def upload_dataset(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
     adapter: str = Form("auto"), service: str = Form("unknown"),
@@ -77,7 +105,7 @@ async def upload_dataset(
     sources = []
     total = 0
     for file in files:
-        content = await file.read()
+        content = file.file.read()
         total += len(content)
         if total > MAX_UPLOAD_BYTES:
             raise HTTPException(413, "Upload size limit exceeded")
@@ -142,19 +170,160 @@ def run_detail(run_id: str, db: Session = Depends(get_db)) -> dict:
     return run_dict(run)
 
 
+@app.get("/api/runs/{run_id}/protocol")
+def run_protocol(run_id: str, db: Session = Depends(get_db)) -> dict:
+    """Пошаговый протокол запуска: этапы обработки с затратами времени и решение
+    по каждому окну — какие правила проверялись, что дала модель и что решил арбитраж."""
+    run = db.get(AnalysisRunRecord, run_id)
+    if run is None:
+        raise HTTPException(404, "Analysis run not found")
+    records = db.scalars(
+        select(WindowDecisionRecord).where(WindowDecisionRecord.run_id == run_id)
+        .order_by(WindowDecisionRecord.window_start)
+    ).all()
+    stats = run.stats or {}
+    return {
+        "run_id": run_id, "dataset_id": run.dataset_id, "status": run.status,
+        "model_id": run.model_id, "steps": stats.get("protocol", []),
+        "notices": stats.get("notices", []), "warnings": run.warnings or [],
+        "windows": [
+            {**record.details, "window_start": iso(record.window_start), "window_end": iso(record.window_end)}
+            for record in records
+        ],
+    }
+
+
+def event_filters(
+    dataset_id: str, service: str | None = None, route: str | None = None,
+    source_type: str | None = None, request_id: str | None = None,
+    template_id: str | None = None,
+    status: list[int] | None = Query(None), severity: list[str] | None = Query(None),
+    time_from: datetime | None = None, time_to: datetime | None = None,
+    q: str | None = None, db: Session = Depends(get_db),
+) -> list:
+    """Условия поиска записей журналов: по времени, источнику, сервису и маршруту,
+    коду ответа, уровню серьёзности, идентификатору запроса или трассировки,
+    шаблону сообщения и тексту. Общие для выдачи записей и подсчёта их числа."""
+    criteria = [EventRecord.dataset_id == dataset_id]
+    if service:
+        criteria.append(EventRecord.service == service)
+    if route:
+        criteria.append(EventRecord.route == route)
+    if source_type:
+        criteria.append(EventRecord.source_type == source_type)
+    if template_id:
+        criteria.append(EventRecord.template_id == template_id)
+    if request_id:
+        criteria.append(or_(EventRecord.request_id == request_id, EventRecord.trace_id == request_id))
+    if status:
+        criteria.append(EventRecord.status.in_(status))
+    if severity:
+        criteria.append(func.lower(EventRecord.severity).in_([item.lower() for item in severity]))
+    if time_from:
+        criteria.append(EventRecord.observed_at >= _storage_time(time_from, db))
+    if time_to:
+        criteria.append(EventRecord.observed_at <= _storage_time(time_to, db))
+    if q:
+        pattern = f"%{_escape_like(q)}%"
+        criteria.append(or_(
+            EventRecord.message.ilike(pattern, escape="\\"),
+            EventRecord.raw.ilike(pattern, escape="\\"),
+            EventRecord.original_uri.ilike(pattern, escape="\\"),
+        ))
+    return criteria
+
+
 @app.get("/api/events")
 def events(
-    dataset_id: str, service: str | None = None, route: str | None = None,
+    filters: list = Depends(event_filters),
     limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    query = select(EventRecord).where(EventRecord.dataset_id == dataset_id)
-    if service:
-        query = query.where(EventRecord.service == service)
-    if route:
-        query = query.where(EventRecord.route == route)
-    records = db.scalars(query.order_by(EventRecord.observed_at).offset(offset).limit(limit)).all()
+    records = db.scalars(
+        select(EventRecord).where(*filters)
+        .order_by(EventRecord.observed_at, EventRecord.id).offset(offset).limit(limit)
+    ).all()
     return [event_dict(record) for record in records]
+
+
+@app.get("/api/events/count")
+def events_count(filters: list = Depends(event_filters), db: Session = Depends(get_db)) -> dict:
+    """Число записей, удовлетворяющих условиям поиска."""
+    count = db.scalar(select(func.count()).select_from(EventRecord).where(*filters))
+    return {"count": int(count or 0)}
+
+
+@app.get("/api/templates")
+def templates(
+    dataset_id: str, limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Шаблоны сообщений набора: результат объединения повторяющихся записей."""
+    records = db.scalars(
+        select(TemplateRecord).where(TemplateRecord.dataset_id == dataset_id)
+        .order_by(TemplateRecord.occurrences.desc(), TemplateRecord.first_seen, TemplateRecord.id)
+        .offset(offset).limit(limit)
+    ).all()
+    return [template_dict(record) for record in records]
+
+
+def _group_stats(db: Session, dataset_id: str, group_ids: set[str]) -> dict[str, dict]:
+    stats: dict[str, dict] = defaultdict(lambda: {"event_count": 0, "request_ids": [], "statuses": []})
+    if group_ids:
+        rows = db.execute(
+            select(EventRecord.group_id, EventRecord.request_id, EventRecord.status)
+            .where(EventRecord.dataset_id == dataset_id, EventRecord.group_id.in_(group_ids))
+        )
+        for group_id, request_id, status in rows:
+            item = stats[group_id]
+            item["event_count"] += 1
+            if request_id and request_id not in item["request_ids"]:
+                item["request_ids"].append(request_id)
+            if status is not None and status not in item["statuses"]:
+                item["statuses"].append(status)
+    for item in stats.values():
+        item["statuses"] = sorted(item["statuses"])
+    return stats
+
+
+def _group_dict(record: RequestGroupRecord, stats: dict) -> dict:
+    return {
+        "group_id": record.id, "link_quality": record.link_quality,
+        "service": record.service, "route": record.route,
+        "started_at": iso(record.started_at), "ended_at": iso(record.ended_at),
+        "event_count": stats["event_count"], "request_ids": stats["request_ids"],
+        "statuses": stats["statuses"],
+    }
+
+
+@app.get("/api/groups")
+def groups(
+    dataset_id: str, link_quality: str | None = None,
+    limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Группы связанных событий одного запроса с качеством связи."""
+    query = select(RequestGroupRecord).where(RequestGroupRecord.dataset_id == dataset_id)
+    if link_quality:
+        query = query.where(RequestGroupRecord.link_quality == link_quality)
+    records = db.scalars(
+        query.order_by(RequestGroupRecord.started_at, RequestGroupRecord.id).offset(offset).limit(limit)
+    ).all()
+    stats = _group_stats(db, dataset_id, {record.id for record in records})
+    return [_group_dict(record, stats.get(record.id) or {"event_count": 0, "request_ids": [], "statuses": []}) for record in records]
+
+
+@app.get("/api/groups/{group_id}")
+def group_detail(group_id: str, db: Session = Depends(get_db)) -> dict:
+    record = db.get(RequestGroupRecord, group_id)
+    if record is None:
+        raise HTTPException(404, "Request group not found")
+    records = db.scalars(
+        select(EventRecord).where(EventRecord.group_id == group_id).order_by(EventRecord.observed_at, EventRecord.id)
+    ).all()
+    return _group_dict(record, _group_stats(db, record.dataset_id, {record.id}).get(record.id) or {
+        "event_count": 0, "request_ids": [], "statuses": [],
+    }) | {"events": [event_dict(item) for item in records]}
 
 
 @app.get("/api/incidents")
@@ -162,7 +331,8 @@ def incidents(
     dataset_id: str | None = None, run_id: str | None = None,
     service: str | None = None, route: str | None = None,
     kind: str | None = None, severity: str | None = None,
-    review_required: bool | None = None, db: Session = Depends(get_db),
+    review_required: bool | None = None,
+    limit: int = Query(500, ge=1, le=2000), db: Session = Depends(get_db),
 ) -> list[dict]:
     query = select(IncidentRecord)
     if dataset_id:
@@ -179,7 +349,9 @@ def incidents(
         query = query.where(IncidentRecord.severity == severity)
     if review_required is not None:
         query = query.where(IncidentRecord.review_required == review_required)
-    records = db.scalars(query.order_by(IncidentRecord.created_at.desc()).limit(500)).all()
+    records = db.scalars(
+        query.order_by(IncidentRecord.created_at.desc(), IncidentRecord.window_start.desc()).limit(limit)
+    ).all()
     return [incident_dict(record) for record in records]
 
 
@@ -188,7 +360,7 @@ def incident_detail(incident_id: str, db: Session = Depends(get_db)) -> dict:
     incident = db.get(IncidentRecord, incident_id)
     if incident is None:
         raise HTTPException(404, "Incident not found")
-    payload = incident_dict(incident, include_evidence=True)
+    payload = incident_detail_dict(incident)
     if incident.model_id:
         model = db.get(ModelVersionRecord, incident.model_id)
         payload["model"] = model_dict(model) if model else None
@@ -198,12 +370,16 @@ def incident_detail(incident_id: str, db: Session = Depends(get_db)) -> dict:
 
 @app.patch("/api/incidents/{incident_id}/review")
 def review_incident(incident_id: str, payload: ReviewRequest, db: Session = Depends(get_db)) -> dict:
+    """Отметка ручной проверки. Проверенный инцидент больше не числится среди
+    требующих проверки; снятие отметки возвращает его в этот перечень, если он
+    был создан из-за конфликта правил."""
     incident = db.get(IncidentRecord, incident_id)
     if incident is None:
         raise HTTPException(404, "Incident not found")
     incident.reviewed_at = utc_now() if payload.reviewed else None
+    incident.review_required = incident.kind == "rule_conflict" and not payload.reviewed
     db.commit()
-    return incident_dict(incident, include_evidence=True)
+    return incident_detail_dict(incident)
 
 
 @app.get("/api/rules")
@@ -258,7 +434,11 @@ def overview(dataset_id: str, run_id: str | None = None, db: Session = Depends(g
             "insufficient_windows": sum(window.status == "insufficient_data" for window in windows),
             "max_error_ratio": max((window.r_4xx + window.r_5xx for window in windows), default=0),
             "evidence_coverage": (run.stats or {}).get("evidence_coverage") if run else None,
+            "by_kind": dict(Counter(incident.kind for incident in incidents_now)),
+            "by_severity": dict(Counter(incident.severity for incident in incidents_now)),
+            "by_hypothesis": dict(Counter(incident.hypothesis or "unknown_anomaly" for incident in incidents_now)),
         },
+        "notices": (run.stats or {}).get("notices", []) if run else [],
     }
 
 
